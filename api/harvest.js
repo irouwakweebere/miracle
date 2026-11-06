@@ -193,7 +193,7 @@ export default async function handler(req, res) {
       if (institution?.id) {
         const workParams = new URLSearchParams({
           filter: `institutions.id:${institution.id.split('/').at(-1)},from_publication_date:${startYear}-01-01,to_publication_date:${endYear}-12-31`,
-          per_page: '25',
+          per_page: '100',
           sort: 'publication_date:desc',
           select: 'id,title,authorships,publication_date,primary_location,doi',
         })
@@ -206,7 +206,7 @@ export default async function handler(req, res) {
         }
 
         const workPayload = await workResponse.json()
-        await Promise.all((workPayload.results || []).slice(0, 15).map(async (work) => {
+        await Promise.all((workPayload.results || []).slice(0, 100).map(async (work) => {
           const link = normalizeArticleUrl(work)
           if (!link || !await verifyLiveUrl(link)) return
 
@@ -231,11 +231,11 @@ export default async function handler(req, res) {
         }))
       }
 
-      if (verified.length === 0) {
+      if (verified.length < 50) {
         const crossrefParams = new URLSearchParams({
           'query.affiliation': organization,
           filter: `from-pub-date:${startYear}-01-01,until-pub-date:${endYear}-12-31`,
-          rows: '50',
+          rows: '100',
           sort: 'published',
           order: 'desc',
         })
@@ -246,7 +246,7 @@ export default async function handler(req, res) {
           })
           if (crossrefResponse.ok) {
             const payload = await crossrefResponse.json()
-            await Promise.all((payload.message?.items || []).slice(0, 25).map(async (item) => {
+            await Promise.all((payload.message?.items || []).slice(0, 100).map(async (item) => {
               const date = getPublicationDate(item)
               const affiliationText = (item.author || []).flatMap((author) =>
                 (author.affiliation || []).map((entry) => entry.name || '')

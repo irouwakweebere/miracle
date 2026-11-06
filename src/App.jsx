@@ -79,6 +79,7 @@ export default function App() {
   const [exportYear, setExportYear] = useState('')
   const [searchMode, setSearchMode] = useState(initialDraft.searchMode || 'person')
   const [organization, setOrganization] = useState(initialDraft.organization || '')
+  const [allYears, setAllYears] = useState(initialDraft.allYears || false)
   const [selectedLecturer, setSelectedLecturer] = useState('')
 
   useEffect(() => {
@@ -94,8 +95,9 @@ export default function App() {
       hasSearched,
       searchMode,
       organization,
+      allYears,
     }))
-  }, [lecturer, startYear, endYear, results, hasSearched, searchMode, organization])
+  }, [lecturer, startYear, endYear, results, hasSearched, searchMode, organization, allYears])
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2600); return () => clearTimeout(t) }, [toast])
 
   const login = () => { localStorage.setItem('lph_logged_in', 'true'); setLoggedIn(true) }
@@ -107,6 +109,8 @@ export default function App() {
     e.preventDefault()
     if (searchMode === 'person' && !lecturer.trim()) return
     if (searchMode === 'organization' && !organization.trim()) return
+    const searchStartYear = allYears ? '1900' : startYear
+    const searchEndYear = allYears ? String(new Date().getFullYear()) : endYear
     setHarvesting(true)
     setResults([])
     setHarvestError('')
@@ -116,8 +120,8 @@ export default function App() {
         name: lecturer.trim(),
         organization: organization.trim(),
         mode: searchMode,
-        startYear,
-        endYear,
+        startYear: searchStartYear,
+        endYear: searchEndYear,
       })
       const response = await fetch(`/api/harvest?${params}`, {
         headers: { Accept: 'application/json' },
@@ -130,7 +134,7 @@ export default function App() {
       setResults(harvestedResults)
 
       if (harvestedResults.length > 0) {
-        const yearRange = `${startYear} - ${endYear}`
+        const yearRange = `${searchStartYear} - ${searchEndYear}`
         const automaticRecords = []
         if (searchMode === 'person') {
           automaticRecords.push({
@@ -197,7 +201,9 @@ export default function App() {
     if (!recordName || !results.length) { setToast('Harvest articles before saving'); return }
     const kept = results.filter((a) => a.kept)
     if (!kept.length) { setToast('Select at least one article'); return }
-    const yearRange = `${startYear} - ${endYear}`
+    const yearRange = allYears
+      ? `1900 - ${new Date().getFullYear()}`
+      : `${startYear} - ${endYear}`
     const existingRecord = records.find((record) =>
       record.lecturer.trim().toLowerCase() === recordName.toLowerCase() &&
       record.range === yearRange
@@ -440,14 +446,29 @@ export default function App() {
                   <button type="button" onClick={() => setSearchMode('person')} className={`flex-1 rounded-md px-3 py-2 text-sm font-semibold ${searchMode === 'person' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Search by lecturer</button>
                   <button type="button" onClick={() => setSearchMode('organization')} className={`flex-1 rounded-md px-3 py-2 text-sm font-semibold ${searchMode === 'organization' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Search by organization</button>
                 </div>
+                <label className="mb-4 flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={allYears}
+                    onChange={(e) => {
+                      setAllYears(e.target.checked)
+                      if (e.target.checked) {
+                        setStartYear('1900')
+                        setEndYear(String(new Date().getFullYear()))
+                      }
+                    }}
+                    className="h-4 w-4 rounded border-slate-300 accent-green-700"
+                  />
+                  Search all publication years
+                </label>
                 <div className="grid gap-4 md:grid-cols-[1fr_180px_180px_auto] md:items-end">
                   {searchMode === 'person' ? (
                     <div><label className="mb-2 block text-sm font-semibold text-slate-700">Lecturer Full Name</label><input value={lecturer} onChange={(e) => setLecturer(e.target.value)} placeholder="e.g. Dr. Eze" className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
                   ) : (
                     <div><label className="mb-2 block text-sm font-semibold text-slate-700">Organization Name</label><input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder="e.g. University of Nigeria, Nsukka" className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
                   )}
-                  <div><label className="mb-2 block text-sm font-semibold text-slate-700">Start Year</label><input type="number" value={startYear} onChange={(e) => setStartYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
-                  <div><label className="mb-2 block text-sm font-semibold text-slate-700">End Year</label><input type="number" value={endYear} onChange={(e) => setEndYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
+                  <div><label className="mb-2 block text-sm font-semibold text-slate-700">Start Year</label><input type="number" value={startYear} disabled={allYears} onChange={(e) => setStartYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700 disabled:bg-slate-100 disabled:text-slate-500"/></div>
+                  <div><label className="mb-2 block text-sm font-semibold text-slate-700">End Year</label><input type="number" value={endYear} disabled={allYears} onChange={(e) => setEndYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700 disabled:bg-slate-100 disabled:text-slate-500"/></div>
                   <button disabled={harvesting} className="flex h-[46px] items-center justify-center gap-2 rounded-lg bg-green-800 px-5 text-sm font-semibold text-white hover:bg-green-900 disabled:opacity-70">{harvesting ? <LoaderCircle className="animate-spin" size={18}/> : <Search size={18}/>} {harvesting ? 'Harvesting...' : 'Harvest'}</button>
                 </div>
               </form>

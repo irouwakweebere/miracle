@@ -161,6 +161,8 @@ app.get('/api/harvest', async (req, res) => {
           console.log(`Organization matched: ${institution.display_name} (${institution.id})`)
         } else {
           console.log(`Organization not matched by institution index: ${organization}; using Crossref affiliation fallback`)
+          workParams.set('search', organization)
+          workParams.set('per_page', '100')
         }
       }
 
