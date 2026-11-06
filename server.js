@@ -160,7 +160,7 @@ app.get('/api/harvest', async (req, res) => {
           )
           console.log(`Organization matched: ${institution.display_name} (${institution.id})`)
         } else {
-          return res.json({ results: [], searchMode: 'organization' })
+          console.log(`Organization not matched by institution index: ${organization}; using Crossref affiliation fallback`)
         }
       }
 

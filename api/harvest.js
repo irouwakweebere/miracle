@@ -82,6 +82,61 @@ function normalizeArticleUrl(work) {
   return candidates.find((url) => typeof url === 'string' && /^https:\/\/[^ ]+$/.test(url)) || null
 }
 
+function uniqueResults(results) {
+  const seen = new Set()
+  return results.filter((result) => {
+    const key = `${String(result.title || '').toLowerCase().trim()}|${String(result.year)}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+async function searchSemanticScholar(name, startYear, endYear) {
+  const params = new URLSearchParams({
+    query: name,
+    limit: '20',
+    year: `${startYear}-${endYear}`,
+    fields: 'title,authors,year,url,venue,publicationDate,externalIds',
+  })
+  const response = await fetch(`https://api.semanticscholar.org/graph/v1/paper/search?${params}`, {
+    signal: AbortSignal.timeout(12000),
+    headers: {
+      'User-Agent': USER_AGENT,
+      ...(process.env.S2_API_KEY ? { 'x-api-key': process.env.S2_API_KEY } : {}),
+    },
+  })
+  if (!response.ok) throw new Error(`Semantic Scholar returned HTTP ${response.status}`)
+  const payload = await response.json()
+  const results = []
+
+  await Promise.all((payload.data || []).slice(0, 12).map(async (paper) => {
+    const authors = (paper.authors || []).map((author) => author.name).filter(Boolean)
+    if (!authors.some((authorName) => nameMatches(name, authorName))) return
+    const year = Number(paper.year)
+    if (!Number.isInteger(year) || year < startYear || year > endYear) return
+
+    let link = typeof paper.url === 'string' ? paper.url : ''
+    if (!/^https:\/\//.test(link) && paper.externalIds?.DOI) {
+      link = `https://doi.org/${paper.externalIds.DOI}`
+    }
+    if (!/^https:\/\//.test(link) || !await verifyLiveUrl(link)) return
+
+    results.push({
+      id: paper.paperId || link,
+      title: paper.title,
+      authors: authors.join('; '),
+      year,
+      publicationDate: paper.publicationDate || `${year}-01-01`,
+      journal: paper.venue || 'Publisher not listed',
+      source: paper.venue || 'Semantic Scholar',
+      link,
+      kept: true,
+    })
+  }))
+  return results
+}
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -134,52 +189,95 @@ export default async function handler(req, res) {
           normalizedOrganization.includes(candidate)
       })
 
-      if (!institution?.id) {
-        return res.status(200).json({ results: [], searchMode: 'organization' })
-      }
-
-      const workParams = new URLSearchParams({
-        filter: `institutions.id:${institution.id.split('/').at(-1)},from_publication_date:${startYear}-01-01,to_publication_date:${endYear}-12-31`,
-        per_page: '25',
-        sort: 'publication_date:desc',
-        select: 'id,title,authorships,publication_date,primary_location,doi',
-      })
-      const workResponse = await fetch(
-        `https://api.openalex.org/works?${workParams}`,
-        { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': USER_AGENT } }
-      )
-      if (!workResponse.ok) {
-        throw new Error(`OpenAlex works search returned HTTP ${workResponse.status}`)
-      }
-
-      const workPayload = await workResponse.json()
       const verified = []
-      await Promise.all((workPayload.results || []).slice(0, 15).map(async (work) => {
-        const link = normalizeArticleUrl(work)
-        if (!link || !await verifyLiveUrl(link)) return
-
-        const publicationDate = String(work.publication_date || '')
-        const year = Number(publicationDate.slice(0, 4))
-        if (year < startYear || year > endYear) return
-
-        const authors = (work.authorships || [])
-          .map((entry) => entry.author?.display_name)
-          .filter(Boolean)
-        verified.push({
-          id: work.id,
-          title: work.title,
-          authors: authors.join('; '),
-          year,
-          publicationDate,
-          journal: work.primary_location?.source?.display_name || 'Publisher not listed',
-          source: work.primary_location?.source?.display_name || 'OpenAlex',
-          link,
-          kept: true,
+      if (institution?.id) {
+        const workParams = new URLSearchParams({
+          filter: `institutions.id:${institution.id.split('/').at(-1)},from_publication_date:${startYear}-01-01,to_publication_date:${endYear}-12-31`,
+          per_page: '25',
+          sort: 'publication_date:desc',
+          select: 'id,title,authorships,publication_date,primary_location,doi',
         })
-      }))
+        const workResponse = await fetch(
+          `https://api.openalex.org/works?${workParams}`,
+          { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': USER_AGENT } }
+        )
+        if (!workResponse.ok) {
+          throw new Error(`OpenAlex works search returned HTTP ${workResponse.status}`)
+        }
 
-      verified.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
-      return res.status(200).json({ results: verified, searchMode: 'organization' })
+        const workPayload = await workResponse.json()
+        await Promise.all((workPayload.results || []).slice(0, 15).map(async (work) => {
+          const link = normalizeArticleUrl(work)
+          if (!link || !await verifyLiveUrl(link)) return
+
+          const publicationDate = String(work.publication_date || '')
+          const year = Number(publicationDate.slice(0, 4))
+          if (year < startYear || year > endYear) return
+
+          const authors = (work.authorships || [])
+            .map((entry) => entry.author?.display_name)
+            .filter(Boolean)
+          verified.push({
+            id: work.id,
+            title: work.title,
+            authors: authors.join('; '),
+            year,
+            publicationDate,
+            journal: work.primary_location?.source?.display_name || 'Publisher not listed',
+            source: work.primary_location?.source?.display_name || 'OpenAlex',
+            link,
+            kept: true,
+          })
+        }))
+      }
+
+      if (verified.length === 0) {
+        const crossrefParams = new URLSearchParams({
+          'query.affiliation': organization,
+          filter: `from-pub-date:${startYear}-01-01,until-pub-date:${endYear}-12-31`,
+          rows: '50',
+          sort: 'published',
+          order: 'desc',
+        })
+        try {
+          const crossrefResponse = await fetch(`https://api.crossref.org/works?${crossrefParams}`, {
+            signal: AbortSignal.timeout(12000),
+            headers: { 'User-Agent': USER_AGENT },
+          })
+          if (crossrefResponse.ok) {
+            const payload = await crossrefResponse.json()
+            await Promise.all((payload.message?.items || []).slice(0, 25).map(async (item) => {
+              const date = getPublicationDate(item)
+              const affiliationText = (item.author || []).flatMap((author) =>
+                (author.affiliation || []).map((entry) => entry.name || '')
+              ).join(' ')
+              const affiliated = normalizeName(affiliationText).includes(normalizeName(organization))
+              if (!date || date.year < startYear || date.year > endYear || !affiliated ||
+                  !/^https:\/\/[^ ]+$/.test(item.URL || '')) return
+              if (!await verifyLiveUrl(item.URL)) return
+              verified.push({
+                id: item.DOI || item.URL,
+                title: item.title?.[0] || 'Untitled publication',
+                authors: (item.author || []).map((author) =>
+                  [author.given, author.family].filter(Boolean).join(' ')
+                ).join('; '),
+                year: date.year,
+                publicationDate: date.isoDate,
+                journal: item['container-title']?.[0] || item.publisher || 'Publisher not listed',
+                source: item['container-title']?.[0] || item.publisher || 'Crossref',
+                link: item.URL,
+                kept: true,
+              })
+            }))
+          }
+        } catch (error) {
+          console.error('Crossref organization affiliation search failed:', error)
+        }
+      }
+
+      const organizationVerified = uniqueResults(verified)
+      organizationVerified.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
+      return res.status(200).json({ results: organizationVerified, searchMode: 'organization' })
     }
 
     const crossrefParams = new URLSearchParams({
@@ -227,9 +325,51 @@ export default async function handler(req, res) {
       })
     }))
 
-    if (verified.length > 0) {
-      verified.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
-      return res.status(200).json({ results: verified, searchMode: 'person' })
+    if (process.env.SERPAPI_KEY) {
+      try {
+        const scholarParams = new URLSearchParams({
+          engine: 'google_scholar',
+          q: `author:"${name}"`,
+          as_ylo: String(startYear),
+          as_yhi: String(endYear),
+          num: '20',
+          api_key: process.env.SERPAPI_KEY,
+        })
+        const scholarResponse = await fetch(`https://serpapi.com/search.json?${scholarParams}`, {
+          signal: AbortSignal.timeout(12000),
+        })
+        if (scholarResponse.ok) {
+          const scholarPayload = await scholarResponse.json()
+          await Promise.all((scholarPayload.organic_results || []).slice(0, 12).map(async (paper) => {
+            const summary = paper.publication_info?.summary || ''
+            if (!summary.toLowerCase().includes(normalizeName(name).split(/\s+/).at(-1))) return
+            const yearMatch = summary.match(/\b(19|20)\d{2}\b/)
+            const year = yearMatch ? Number(yearMatch[0]) : null
+            if (!year || year < startYear || year > endYear) return
+            const link = String(paper.link || '')
+            if (!/^https:\/\//.test(link) || !await verifyLiveUrl(link)) return
+            verified.push({
+              id: link,
+              title: paper.title,
+              authors: summary.replace(/\s+-\s+.*/, '').trim(),
+              year,
+              publicationDate: `${year}-01-01`,
+              journal: paper.publication_info?.summary?.split(' - ').at(-1) || 'Google Scholar',
+              source: 'Google Scholar',
+              link,
+              kept: true,
+            })
+          }))
+        }
+      } catch (error) {
+        console.error('Google Scholar SerpAPI search failed:', error)
+      }
+    }
+
+    try {
+      verified.push(...await searchSemanticScholar(name, startYear, endYear))
+    } catch (error) {
+      console.error('Semantic Scholar search failed:', error)
     }
 
     const authorParams = new URLSearchParams({ search: name, per_page: '10' })
@@ -246,7 +386,9 @@ export default async function handler(req, res) {
       nameMatches(name, author.display_name)
     )
     if (!matchingAuthor?.id) {
-      return res.status(200).json({ results: [], searchMode: 'person' })
+      const combinedNoAuthor = uniqueResults(verified)
+      combinedNoAuthor.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
+      return res.status(200).json({ results: combinedNoAuthor, searchMode: 'person' })
     }
 
     const workParams = new URLSearchParams({
@@ -291,8 +433,9 @@ export default async function handler(req, res) {
       })
     }))
 
-    fallbackVerified.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
-    return res.status(200).json({ results: fallbackVerified, searchMode: 'person' })
+    const combinedVerified = uniqueResults([...verified, ...fallbackVerified])
+    combinedVerified.sort((a, b) => b.publicationDate.localeCompare(a.publicationDate))
+    return res.status(200).json({ results: combinedVerified, searchMode: 'person' })
   } catch (error) {
     console.error('Vercel harvest API failed:', error)
     return res.status(502).json({
