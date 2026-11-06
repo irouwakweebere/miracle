@@ -1,14 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  BookOpen, ChevronDown, Download, FileText, History, LayoutDashboard,
-  LogOut, Menu, MoreVertical, Pencil, Plus, Search, Trash2, Upload,
+  BookOpen, Download, FileText, History, LayoutDashboard,
+  LogOut, Menu, Pencil, Plus, Search, Trash2, Upload,
   X, CalendarDays, Users, Library, ExternalLink, Check, LoaderCircle,
 } from 'lucide-react'
 import { Document, Packer, Paragraph, TextRun, ExternalHyperlink, HeadingLevel, AlignmentType } from 'docx'
 import { saveAs } from 'file-saver'
 import { jsPDF } from 'jspdf'
-
-const sampleArticles = []
 
 const seedRecords = [
 ]
@@ -19,11 +17,55 @@ const navItems = [
   { id: 'records', label: 'Saved Records', icon: History },
 ]
 
+async function hashPassword(password) {
+  const bytes = new TextEncoder().encode(password)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function Login({ onLogin }) {
+  const [mode, setMode] = useState('signin')
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setError('')
+    setSubmitting(true)
+    try {
+      const normalizedEmail = email.trim().toLowerCase()
+      const accounts = JSON.parse(localStorage.getItem('lph_accounts') || '[]')
+      const passwordHash = await hashPassword(password)
+
+      if (mode === 'register') {
+        if (name.trim().length < 2) throw new Error('Please enter your full name.')
+        if (password.length < 6) throw new Error('Password must be at least 6 characters.')
+        if (accounts.some((account) => account.email === normalizedEmail)) {
+          throw new Error('An account with this email already exists. Please sign in.')
+        }
+        const account = { name: name.trim(), email: normalizedEmail, passwordHash }
+        localStorage.setItem('lph_accounts', JSON.stringify([...accounts, account]))
+        onLogin(account)
+        return
+      }
+
+      const account = accounts.find((item) => item.email === normalizedEmail)
+      if (!account || account.passwordHash !== passwordHash) {
+        throw new Error('Incorrect email or password. Register first if you do not have an account.')
+      }
+      onLogin(account)
+    } catch (submitError) {
+      setError(submitError.message || 'Unable to complete authentication.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
-    <div className="min-h-screen bg-[#f1f6f2] flex items-center justify-center p-5">
+    <div className="min-h-screen bg-[#f1f6f2] flex flex-col items-center justify-center p-5">
       <div className="w-full max-w-md rounded-2xl bg-white shadow-xl border border-green-100 overflow-hidden">
         <div className="bg-green-800 px-8 py-8 text-white text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-white text-green-800">
@@ -32,25 +74,41 @@ function Login({ onLogin }) {
           <h1 className="text-xl font-bold">Scholar Harvest</h1>
           <p className="mt-1 text-sm text-green-100">University ICT Unit</p>
         </div>
-        <form className="space-y-5 p-8" onSubmit={(e) => { e.preventDefault(); onLogin() }}>
+        <div className="mx-8 mt-6 grid grid-cols-2 rounded-lg bg-slate-100 p-1">
+          <button type="button" onClick={() => { setMode('signin'); setError('') }} className={`rounded-md py-2 text-sm font-semibold ${mode === 'signin' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Sign in</button>
+          <button type="button" onClick={() => { setMode('register'); setError('') }} className={`rounded-md py-2 text-sm font-semibold ${mode === 'register' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Register</button>
+        </div>
+        <form className="space-y-5 p-8 pt-5" onSubmit={submit}>
+          {mode === 'register' && (
+            <div>
+              <label className="mb-2 block text-sm font-semibold text-slate-700">Full name</label>
+              <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Ebere Miracle" className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100" />
+            </div>
+          )}
           <div>
             <label className="mb-2 block text-sm font-semibold text-slate-700">Email address</label>
             <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="staff@unn.edu.ng" className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100" />
           </div>
           <div>
             <label className="mb-2 block text-sm font-semibold text-slate-700">Password</label>
-            <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100" />
+            <input type="password" required minLength={mode === 'register' ? 6 : undefined} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === 'register' ? 'Create a password' : 'Enter your password'} className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100" />
           </div>
-          <button className="w-full rounded-lg bg-green-800 py-3 font-semibold text-white shadow-sm hover:bg-green-900">Sign in</button>
-          <p className="text-center text-xs text-slate-400">Secure access for authorized ICT staff only</p>
+          {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+          <button disabled={submitting} className="w-full rounded-lg bg-green-800 py-3 font-semibold text-white shadow-sm hover:bg-green-900 disabled:opacity-70">{submitting ? 'Please wait...' : mode === 'register' ? 'Create account' : 'Sign in'}</button>
+          <p className="text-center text-xs text-slate-400">Authorized University ICT staff access</p>
         </form>
       </div>
+      <p className="mt-6 text-sm text-slate-500">&copy; 2026 University ICT Unit</p>
     </div>
   )
 }
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(() => localStorage.getItem('lph_logged_in') === 'true')
+  const [currentUser, setCurrentUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('lph_current_user') || 'null') } catch { return null }
+  })
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine)
   const [page, setPage] = useState('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [records, setRecords] = useState(() => {
@@ -99,9 +157,29 @@ export default function App() {
     }))
   }, [lecturer, startYear, endYear, results, hasSearched, searchMode, organization, allYears])
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2600); return () => clearTimeout(t) }, [toast])
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true)
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
 
-  const login = () => { localStorage.setItem('lph_logged_in', 'true'); setLoggedIn(true) }
-  const logout = () => { localStorage.removeItem('lph_logged_in'); setLoggedIn(false) }
+  const login = (account) => {
+    localStorage.setItem('lph_logged_in', 'true')
+    localStorage.setItem('lph_current_user', JSON.stringify(account))
+    setCurrentUser(account)
+    setLoggedIn(true)
+  }
+  const logout = () => {
+    localStorage.removeItem('lph_logged_in')
+    localStorage.removeItem('lph_current_user')
+    setCurrentUser(null)
+    setLoggedIn(false)
+  }
   const totalArticles = records.reduce((sum, r) => sum + r.articles.length, 0)
   const totalLecturers = new Set(records.map((record) => record.lecturer.trim().toLowerCase())).size
 
@@ -364,6 +442,23 @@ export default function App() {
     setToast('PDF exported')
   }
 
+  if (!isOnline) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#f1f6f2] p-5 text-center">
+        <div className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-8 shadow-xl">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-50 text-red-700">
+            <X size={32}/>
+          </div>
+          <p className="mt-5 text-sm font-semibold uppercase tracking-wide text-red-600">Connection error</p>
+          <h1 className="mt-2 text-2xl font-bold text-slate-900">You are offline</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Your internet connection was lost. Check your network and reconnect to continue using Publication Harvester.</p>
+          <button onClick={() => window.location.reload()} className="mt-6 w-full rounded-lg bg-green-800 py-3 font-semibold text-white hover:bg-green-900">Try again</button>
+        </div>
+        <footer className="mt-6 text-sm text-slate-500">&copy; 2026 University ICT Unit</footer>
+      </div>
+    )
+  }
+
   if (!loggedIn) return <Login onLogin={login} />
 
   const filteredRecords = records.filter((r) =>
@@ -403,8 +498,11 @@ export default function App() {
             <input value={recordSearch} onChange={(e) => { setRecordSearch(e.target.value); if (e.target.value) setPage('records') }} placeholder="Search saved lecturers..." className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-10 pr-4 text-sm outline-none focus:border-green-700 focus:bg-white"/>
           </div>
           <div className="ml-auto flex items-center gap-3">
-            <div className="hidden text-right sm:block"><p className="text-sm font-semibold text-slate-800">ICT Administrator</p><p className="text-xs text-slate-500">University ICT Unit</p></div>
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-green-100 text-sm font-bold text-green-800">ICT</div>
+            <div className="hidden text-right sm:block"><p className="text-sm font-semibold text-slate-800">Hello, {currentUser?.name || 'ICT Staff'}</p><p className="text-xs text-slate-500">University ICT Unit</p></div>
+            <p className="text-sm font-semibold text-slate-800 sm:hidden">Hello, {(currentUser?.name || 'ICT Staff').split(/\s+/)[0]}</p>
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-green-100 text-sm font-bold text-green-800">
+              {(currentUser?.name || 'ICT').split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
+            </div>
           </div>
         </header>
 
@@ -558,6 +656,9 @@ export default function App() {
             </div>
           )}
         </main>
+        <footer className="border-t border-slate-200 bg-white px-4 py-4 text-center text-xs text-slate-500 md:px-8">
+          &copy; 2026 Lecturer Publication Harvester. University ICT Unit.
+        </footer>
       </div>
 
       {editing && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"><form onSubmit={(e) => { e.preventEvent?.(); setResults((old) => old.map((a) => a.id === editing.id ? editing : a)); setEditing(null); setToast('Article updated') }} className="w-full max-w-lg rounded-xl bg-white shadow-xl">
