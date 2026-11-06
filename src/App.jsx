@@ -29,7 +29,7 @@ function Login({ onLogin }) {
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-white text-green-800">
             <BookOpen size={30} />
           </div>
-          <h1 className="text-xl font-bold">Lecturer Publication Harvester</h1>
+          <h1 className="text-xl font-bold">Scholar Harvest</h1>
           <p className="mt-1 text-sm text-green-100">University ICT Unit</p>
         </div>
         <form className="space-y-5 p-8" onSubmit={(e) => { e.preventDefault(); onLogin() }}>
@@ -57,32 +57,56 @@ export default function App() {
     const saved = localStorage.getItem('lph_records_v2')
     return saved ? JSON.parse(saved) : seedRecords
   })
-  const [lecturer, setLecturer] = useState('')
-  const [startYear, setStartYear] = useState('2020')
-  const [endYear, setEndYear] = useState('2024')
+  const [initialDraft] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lph_current_harvest') || 'null') || {}
+    } catch {
+      return {}
+    }
+  })
+  const [lecturer, setLecturer] = useState(initialDraft.lecturer || '')
+  const [startYear, setStartYear] = useState(initialDraft.startYear || '2020')
+  const [endYear, setEndYear] = useState(initialDraft.endYear || '2024')
   const [harvesting, setHarvesting] = useState(false)
-  const [results, setResults] = useState([])
+  const [results, setResults] = useState(initialDraft.results || [])
   const [harvestError, setHarvestError] = useState('')
-  const [hasSearched, setHasSearched] = useState(false)
+  const [hasSearched, setHasSearched] = useState(initialDraft.hasSearched || false)
   const [sortBy, setSortBy] = useState('newest')
   const [yearFilter, setYearFilter] = useState('all')
   const [recordSearch, setRecordSearch] = useState('')
   const [editing, setEditing] = useState(null)
   const [toast, setToast] = useState('')
+  const [exportYear, setExportYear] = useState('')
+  const [searchMode, setSearchMode] = useState(initialDraft.searchMode || 'person')
+  const [organization, setOrganization] = useState(initialDraft.organization || '')
+  const [selectedLecturer, setSelectedLecturer] = useState('')
 
   useEffect(() => {
     localStorage.setItem('lph_records_v2', JSON.stringify(records))
     localStorage.removeItem('lph_records')
   }, [records])
+  useEffect(() => {
+    localStorage.setItem('lph_current_harvest', JSON.stringify({
+      lecturer,
+      startYear,
+      endYear,
+      results,
+      hasSearched,
+      searchMode,
+      organization,
+    }))
+  }, [lecturer, startYear, endYear, results, hasSearched, searchMode, organization])
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2600); return () => clearTimeout(t) }, [toast])
 
   const login = () => { localStorage.setItem('lph_logged_in', 'true'); setLoggedIn(true) }
   const logout = () => { localStorage.removeItem('lph_logged_in'); setLoggedIn(false) }
   const totalArticles = records.reduce((sum, r) => sum + r.articles.length, 0)
+  const totalLecturers = new Set(records.map((record) => record.lecturer.trim().toLowerCase())).size
 
   const harvest = async (e) => {
     e.preventDefault()
-    if (!lecturer.trim()) return
+    if (searchMode === 'person' && !lecturer.trim()) return
+    if (searchMode === 'organization' && !organization.trim()) return
     setHarvesting(true)
     setResults([])
     setHarvestError('')
@@ -90,6 +114,8 @@ export default function App() {
     try {
       const params = new URLSearchParams({
         name: lecturer.trim(),
+        organization: organization.trim(),
+        mode: searchMode,
         startYear,
         endYear,
       })
@@ -100,7 +126,54 @@ export default function App() {
       if (!response.ok) {
         throw new Error(payload.error || `Search failed with HTTP ${response.status}`)
       }
-      setResults(payload.results || [])
+      const harvestedResults = payload.results || []
+      setResults(harvestedResults)
+
+      if (harvestedResults.length > 0) {
+        const yearRange = `${startYear} - ${endYear}`
+        const automaticRecords = []
+        if (searchMode === 'person') {
+          automaticRecords.push({
+            id: Date.now(),
+            lecturer: lecturer.trim(),
+            range: yearRange,
+            date: new Date().toISOString().slice(0, 10),
+            articles: harvestedResults,
+          })
+        } else {
+          const groups = new Map()
+          harvestedResults.forEach((article) => {
+            const authorNames = article.authors
+              ? article.authors.split(';').map((name) => name.trim()).filter(Boolean)
+              : []
+            authorNames.forEach((authorName) => {
+              if (!groups.has(authorName)) groups.set(authorName, [])
+              const duplicate = groups.get(authorName).some((saved) =>
+                saved.title.trim().toLowerCase() === article.title.trim().toLowerCase()
+              )
+              if (!duplicate) groups.get(authorName).push(article)
+            })
+          })
+          groups.forEach((articles, authorName) => {
+            automaticRecords.push({
+              id: `${Date.now()}-${authorName}`,
+              lecturer: authorName,
+              range: yearRange,
+              date: new Date().toISOString().slice(0, 10),
+              articles,
+            })
+          })
+        }
+        setRecords((old) => {
+          const keys = new Set(automaticRecords.map((record) =>
+            `${record.lecturer.trim().toLowerCase()}|${record.range}`
+          ))
+          const withoutDuplicate = old.filter((record) =>
+            !keys.has(`${record.lecturer.trim().toLowerCase()}|${record.range}`)
+          )
+          return [...automaticRecords, ...withoutDuplicate]
+        })
+      }
     } catch (error) {
       console.error('Article harvest failed:', error)
       setHarvestError(error.message || 'The publication search service could not be reached. Please try again shortly.')
@@ -120,11 +193,29 @@ export default function App() {
   }, [results, sortBy, yearFilter])
 
   const saveRecord = () => {
-    if (!lecturer.trim() || !results.length) { setToast('Harvest articles before saving'); return }
+    const recordName = searchMode === 'person' ? lecturer.trim() : organization.trim()
+    if (!recordName || !results.length) { setToast('Harvest articles before saving'); return }
     const kept = results.filter((a) => a.kept)
     if (!kept.length) { setToast('Select at least one article'); return }
-    const record = { id: Date.now(), lecturer, range: `${startYear} - ${endYear}`, date: new Date().toISOString().slice(0, 10), articles: kept }
-    setRecords((old) => [record, ...old])
+    const yearRange = `${startYear} - ${endYear}`
+    const existingRecord = records.find((record) =>
+      record.lecturer.trim().toLowerCase() === recordName.toLowerCase() &&
+      record.range === yearRange
+    )
+    const record = {
+      id: existingRecord?.id || Date.now(),
+      lecturer: recordName,
+      range: yearRange,
+      date: new Date().toISOString().slice(0, 10),
+      articles: kept,
+    }
+    setRecords((old) => [
+      record,
+      ...old.filter((item) =>
+        !(item.lecturer.trim().toLowerCase() === recordName.toLowerCase() &&
+          item.range === yearRange)
+      ),
+    ])
     setToast('Harvest saved successfully')
   }
 
@@ -162,6 +253,93 @@ export default function App() {
     setToast('Word document exported')
   }
 
+  const exportYearWord = async () => {
+    const selectedYear = exportYear || availableYears[0]
+    if (!selectedYear) {
+      setToast('Select a publication year')
+      return
+    }
+
+    const groupedLecturers = new Map()
+    records.forEach((record) => {
+      const articles = record.articles.filter((article) => String(article.year) === String(selectedYear))
+      if (!articles.length) return
+
+      const lecturerKey = record.lecturer.trim().toLowerCase()
+      if (!groupedLecturers.has(lecturerKey)) {
+        groupedLecturers.set(lecturerKey, { lecturer: record.lecturer, articles: [] })
+      }
+
+      const lecturerGroup = groupedLecturers.get(lecturerKey)
+      articles.forEach((article) => {
+        const duplicate = lecturerGroup.articles.some((saved) =>
+          saved.title.trim().toLowerCase() === article.title.trim().toLowerCase()
+        )
+        if (!duplicate) lecturerGroup.articles.push(article)
+      })
+    })
+
+    const lecturers = [...groupedLecturers.values()].sort((a, b) =>
+      a.lecturer.localeCompare(b.lecturer)
+    )
+
+    if (!lecturers.length) {
+      setToast(`No saved publications found for ${exportYear}`)
+      return
+    }
+
+    const children = [
+      new Paragraph({
+        heading: HeadingLevel.TITLE,
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: `Publications for ${selectedYear}`, bold: true, size: 36 })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: 'University Lecturer Publication Report', italics: true, color: '166534', size: 24 })],
+      }),
+      new Paragraph({ text: '' }),
+    ]
+
+    lecturers.forEach((group) => {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        children: [new TextRun({ text: group.lecturer, bold: true, color: '166534' })],
+      }))
+
+      const sortedArticles = [...group.articles].sort((a, b) =>
+        a.title.localeCompare(b.title)
+      )
+
+      sortedArticles.forEach((article, index) => {
+        children.push(new Paragraph({
+          children: [
+            new TextRun({ text: `${index + 1}. `, bold: true }),
+            new TextRun({ text: `${article.authors || 'Authors not listed'} (${selectedYear}). ` }),
+            new TextRun({ text: `${article.title}. `, italics: true }),
+            new TextRun({ text: `${article.journal || article.source || 'Source not listed'}.` }),
+          ],
+        }))
+        if (article.link) {
+          children.push(new Paragraph({
+            children: [
+              new ExternalHyperlink({
+                children: [new TextRun({ text: article.link, style: 'Hyperlink' })],
+                link: article.link,
+              }),
+            ],
+          }))
+        }
+        children.push(new Paragraph({ text: '' }))
+      })
+    })
+
+    const doc = new Document({ sections: [{ children }] })
+    const blob = await Packer.toBlob(doc)
+    saveAs(blob, `Publications_${selectedYear}.docx`)
+    setToast(`Publications for ${selectedYear} exported`)
+  }
+
   const exportPdf = (record = { lecturer: lecturer || 'Lecturer Name', range: `${startYear} - ${endYear}`, articles: results.filter((a) => a.kept) }) => {
     const pdf = new jsPDF()
     const articles = record.articles.length ? record.articles : results.filter((a) => a.kept)
@@ -182,7 +360,13 @@ export default function App() {
 
   if (!loggedIn) return <Login onLogin={login} />
 
-  const filteredRecords = records.filter((r) => r.lecturer.toLowerCase().includes(recordSearch.toLowerCase()))
+  const filteredRecords = records.filter((r) =>
+    r.lecturer.toLowerCase().includes(recordSearch.toLowerCase()) &&
+    (!selectedLecturer || r.lecturer.toLowerCase() === selectedLecturer.toLowerCase())
+  )
+  const availableYears = [...new Set(records.flatMap((record) =>
+    record.articles.map((article) => Number(article.year)).filter((year) => Number.isFinite(year))
+  ))].sort((a, b) => b - a)
 
   const navigate = (id) => { setPage(id); setSidebarOpen(false) }
 
@@ -227,13 +411,13 @@ export default function App() {
               </div>
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {[
-                  { label: 'Lecturers Harvested', value: records.length, icon: Users, color: 'bg-blue-50 text-blue-700' },
-                  { label: 'Articles Harvested', value: totalArticles, icon: Library, color: 'bg-green-50 text-green-700' },
-                  { label: 'Recent Harvests', value: records.length, icon: CalendarDays, color: 'bg-amber-50 text-amber-700' },
+                  { label: 'Lecturers Harvested', value: totalLecturers, icon: Users, color: 'bg-blue-50 text-blue-700', action: () => { setSelectedLecturer(''); navigate('records') } },
+                  { label: 'Articles Harvested', value: totalArticles, icon: Library, color: 'bg-green-50 text-green-700', action: () => { setSelectedLecturer(''); navigate('records') } },
+                  { label: 'Recent Harvests', value: records.length, icon: CalendarDays, color: 'bg-amber-50 text-amber-700', action: () => navigate('records') },
                 ].map((stat) => { const Icon = stat.icon; return (
-                  <div key={stat.label} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <button key={stat.label} onClick={stat.action} className="rounded-xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-green-300 hover:shadow-md">
                     <div className="flex items-center justify-between"><div><p className="text-sm text-slate-500">{stat.label}</p><p className="mt-2 text-3xl font-bold text-slate-900">{stat.value}</p></div><div className={`flex h-12 w-12 items-center justify-center rounded-xl ${stat.color}`}><Icon size={24}/></div></div>
-                  </div>
+                  </button>
                 ) })}
               </div>
               <div className="mt-6 rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -252,13 +436,38 @@ export default function App() {
             <div>
               <div className="mb-6"><p className="text-sm text-slate-500">Publication search</p><h1 className="text-2xl font-bold text-slate-900">Harvest New Articles</h1></div>
               <form onSubmit={harvest} className="mb-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4 flex rounded-lg bg-slate-100 p-1">
+                  <button type="button" onClick={() => setSearchMode('person')} className={`flex-1 rounded-md px-3 py-2 text-sm font-semibold ${searchMode === 'person' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Search by lecturer</button>
+                  <button type="button" onClick={() => setSearchMode('organization')} className={`flex-1 rounded-md px-3 py-2 text-sm font-semibold ${searchMode === 'organization' ? 'bg-white text-green-800 shadow-sm' : 'text-slate-500'}`}>Search by organization</button>
+                </div>
                 <div className="grid gap-4 md:grid-cols-[1fr_180px_180px_auto] md:items-end">
-                  <div><label className="mb-2 block text-sm font-semibold text-slate-700">Lecturer Full Name</label><input value={lecturer} onChange={(e) => setLecturer(e.target.value)} placeholder="e.g. Dr. Eze" className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
+                  {searchMode === 'person' ? (
+                    <div><label className="mb-2 block text-sm font-semibold text-slate-700">Lecturer Full Name</label><input value={lecturer} onChange={(e) => setLecturer(e.target.value)} placeholder="e.g. Dr. Eze" className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
+                  ) : (
+                    <div><label className="mb-2 block text-sm font-semibold text-slate-700">Organization Name</label><input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder="e.g. University of Nigeria, Nsukka" className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
+                  )}
                   <div><label className="mb-2 block text-sm font-semibold text-slate-700">Start Year</label><input type="number" value={startYear} onChange={(e) => setStartYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
                   <div><label className="mb-2 block text-sm font-semibold text-slate-700">End Year</label><input type="number" value={endYear} onChange={(e) => setEndYear(e.target.value)} className="w-full rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:border-green-700"/></div>
                   <button disabled={harvesting} className="flex h-[46px] items-center justify-center gap-2 rounded-lg bg-green-800 px-5 text-sm font-semibold text-white hover:bg-green-900 disabled:opacity-70">{harvesting ? <LoaderCircle className="animate-spin" size={18}/> : <Search size={18}/>} {harvesting ? 'Harvesting...' : 'Harvest'}</button>
                 </div>
               </form>
+              {(lecturer || organization || results.length) && (
+                <div className="mb-4 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResults([])
+                      setHarvestError('')
+                      setHasSearched(false)
+                      setLecturer('')
+                      setOrganization('')
+                    }}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Clear current search
+                  </button>
+                </div>
+              )}
 
               {harvesting && <div className="rounded-xl border border-slate-200 bg-white py-16 text-center"><LoaderCircle className="mx-auto animate-spin text-green-700" size={36}/><p className="mt-4 font-semibold text-slate-700">Searching publication sources...</p><p className="mt-1 text-sm text-slate-400">Please wait while we collect the articles</p></div>}
 
@@ -288,13 +497,37 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {!harvesting && !results.length && !harvestError && <div className="rounded-xl border border-dashed border-slate-300 bg-white py-16 text-center"><Library className="mx-auto text-slate-300" size={42}/><p className="mt-3 font-semibold text-slate-700">{hasSearched ? `No verified articles found for this author in this date range` : 'No publications loaded'}</p><p className="mt-1 text-sm text-slate-400">{hasSearched ? 'Try another name or broaden the year range.' : 'Enter a lecturer and year range to begin'}</p></div>}
+              {!harvesting && !results.length && !harvestError && <div className="rounded-xl border border-dashed border-slate-300 bg-white py-16 text-center"><Library className="mx-auto text-slate-300" size={42}/><p className="mt-3 font-semibold text-slate-700">{hasSearched ? (searchMode === 'person' ? 'No verified articles found for this author in this date range' : 'No verified publications found for this organization in this date range') : 'No publications loaded'}</p><p className="mt-1 text-sm text-slate-400">{hasSearched ? 'Try another organization or broaden the year range.' : 'Enter a lecturer or organization and year range to begin'}</p></div>}
             </div>
           )}
 
           {page === 'records' && (
             <div>
               <div className="mb-6 flex items-center justify-between"><div><p className="text-sm text-slate-500">Harvest history</p><h1 className="text-2xl font-bold text-slate-900">Saved Records</h1></div><button onClick={() => navigate('harvest')} className="hidden items-center gap-2 rounded-lg bg-green-800 px-4 py-2.5 text-sm font-semibold text-white sm:flex"><Plus size={18}/> New Harvest</button></div>
+              <div className="mb-4 flex flex-col gap-3 rounded-xl border border-green-200 bg-green-50 p-4 sm:flex-row sm:items-end">
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-green-900">Export publications by year</p>
+                  <p className="mt-1 text-xs text-green-700">Creates one Word report containing all lecturers and their articles for the selected year.</p>
+                </div>
+                <div className="flex gap-2">
+                  <select
+                    value={exportYear || availableYears[0] || ''}
+                    onChange={(e) => setExportYear(e.target.value)}
+                    disabled={!availableYears.length}
+                    className="min-w-28 rounded-lg border border-green-300 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                  >
+                    {!availableYears.length && <option value="">No years</option>}
+                    {availableYears.map((year) => <option key={year} value={year}>{year}</option>)}
+                  </select>
+                  <button
+                    onClick={exportYearWord}
+                    disabled={!availableYears.length}
+                    className="flex items-center gap-2 rounded-lg bg-green-800 px-4 py-2.5 text-sm font-semibold text-white hover:bg-green-900 disabled:opacity-50"
+                  >
+                    <FileText size={17}/> Export all by year
+                  </button>
+                </div>
+              </div>
               <div className="mb-4 md:hidden"><div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18}/><input value={recordSearch} onChange={(e) => setRecordSearch(e.target.value)} placeholder="Search lecturers..." className="w-full rounded-lg border border-slate-200 bg-white py-3 pl-10 pr-4 text-sm"/></div></div>
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                 <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-5 py-3 font-medium">Lecturer Name</th><th className="px-5 py-3 font-medium">Year Range</th><th className="px-5 py-3 font-medium">Articles</th><th className="px-5 py-3 font-medium">Date Harvested</th><th className="px-5 py-3 font-medium text-right">Actions</th></tr></thead>

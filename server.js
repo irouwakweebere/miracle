@@ -39,6 +39,21 @@ function authorMatches(searchedName, authors) {
   })
 }
 
+function nameMatches(searchedName, candidateName) {
+  const searched = normalizeName(searchedName)
+  const candidate = normalizeName(candidateName)
+  if (!searched || !candidate) return false
+  if (searched === candidate) return true
+
+  const searchedParts = searched.split(/\s+/).filter(Boolean)
+  const candidateParts = candidate.split(/\s+/).filter(Boolean)
+  if (!searchedParts.length || !candidateParts.length) return false
+  const searchedLast = searchedParts.at(-1)
+  const candidateLast = candidateParts.at(-1)
+  return searchedLast === candidateLast &&
+    searchedParts[0][0] === candidateParts[0][0]
+}
+
 function getPublicationDate(item) {
   const parts =
     item.published?.['date-parts']?.[0] ||
@@ -54,6 +69,17 @@ function getPublicationDate(item) {
   return { year, isoDate }
 }
 
+function normalizeArticleUrl(work) {
+  const landingUrl = work.primary_location?.landing_page_url
+  const doi = work.doi
+  const candidates = [
+    landingUrl,
+    typeof doi === 'string' && /^https:\/\//.test(doi) ? doi : null,
+    typeof doi === 'string' && /^10\.\d{4,9}\//.test(doi) ? `https://doi.org/${doi}` : null,
+  ]
+  return candidates.find((url) => typeof url === 'string' && /^https:\/\/[^ ]+$/.test(url)) || null
+}
+
 async function verifyLiveUrl(url) {
   if (!/^https:\/\/[^ ]+$/.test(url)) return false
   try {
@@ -63,7 +89,8 @@ async function verifyLiveUrl(url) {
       signal: AbortSignal.timeout(8000),
       headers: { 'User-Agent': 'University-Lecturer-Publication-Harvester/1.0 (mailto:ict@unn.edu.ng)' },
     })
-    if (head.ok || (head.status >= 300 && head.status < 400)) return true
+    if (head.ok || (head.status >= 300 && head.status < 400) ||
+        (head.status >= 403 && head.status < 500 && head.status !== 404 && head.status !== 410)) return true
   } catch (error) {
     console.warn(`HEAD verification failed for ${url}:`, error.message)
   }
@@ -75,7 +102,7 @@ async function verifyLiveUrl(url) {
       signal: AbortSignal.timeout(8000),
       headers: { 'Range': 'bytes=0-2047', 'User-Agent': 'University-Lecturer-Publication-Harvester/1.0 (mailto:ict@unn.edu.ng)' },
     })
-    return get.ok
+    return get.ok || (get.status >= 300 && get.status < 400)
   } catch (error) {
     console.warn(`GET verification failed for ${url}:`, error.message)
     return false
@@ -84,14 +111,92 @@ async function verifyLiveUrl(url) {
 
 app.get('/api/harvest', async (req, res) => {
   const name = String(req.query.name || '').trim()
+  const organization = String(req.query.organization || '').trim()
+  const mode = String(req.query.mode || (name ? 'person' : 'organization')).trim()
   const startYear = Number(req.query.startYear)
   const endYear = Number(req.query.endYear)
 
-  if (!name || !Number.isInteger(startYear) || !Number.isInteger(endYear) || startYear > endYear) {
-    return res.status(400).json({ error: 'Enter a valid author name and year range.' })
+  if (!Number.isInteger(startYear) || !Number.isInteger(endYear) || startYear > endYear) {
+    return res.status(400).json({ error: 'Enter a valid year range.' })
+  }
+  if (mode === 'person' && !name) {
+    return res.status(400).json({ error: 'Enter the lecturer name.' })
+  }
+  if (mode === 'organization' && !organization) {
+    return res.status(400).json({ error: 'Enter an organization name.' })
   }
 
   try {
+    if (mode === 'organization') {
+      const workParams = new URLSearchParams({
+        filter: `from_publication_date:${startYear}-01-01,to_publication_date:${endYear}-12-31`,
+        per_page: '100',
+        sort: 'publication_date:desc',
+        select: 'id,title,authorships,publication_date,primary_location,doi',
+      })
+
+      if (organization) {
+        const institutionSearch = normalizeName(organization).startsWith('university of nigeria')
+          ? 'University of Nigeria'
+          : organization
+        const institutionParams = new URLSearchParams({ search: institutionSearch, per_page: '10' })
+        const institutionResponse = await fetch(`https://api.openalex.org/institutions?${institutionParams}`, {
+          signal: AbortSignal.timeout(15000),
+          headers: { 'User-Agent': 'University-Lecturer-Publication-Harvester/1.0 (mailto:ict@unn.edu.ng)' },
+        })
+        if (!institutionResponse.ok) throw new Error(`OpenAlex institution search returned HTTP ${institutionResponse.status}`)
+        const institutionPayload = await institutionResponse.json()
+        const normalizedOrganization = normalizeName(organization)
+        const institution = (institutionPayload.results || []).find((item) =>
+          normalizeName(item.display_name) === normalizedOrganization
+        ) || (institutionPayload.results || []).find((item) => {
+          const candidate = normalizeName(item.display_name)
+          return candidate.includes(normalizedOrganization) || normalizedOrganization.includes(candidate)
+        })
+
+        if (institution?.id) {
+          workParams.set('filter',
+            `institutions.id:${institution.id.split('/').at(-1)},from_publication_date:${startYear}-01-01,to_publication_date:${endYear}-12-31`
+          )
+          console.log(`Organization matched: ${institution.display_name} (${institution.id})`)
+        } else {
+          return res.json({ results: [], searchMode: 'organization' })
+        }
+      }
+
+      const workResponse = await fetch(`https://api.openalex.org/works?${workParams}`, {
+        signal: AbortSignal.timeout(15000),
+        headers: { 'User-Agent': 'University-Lecturer-Publication-Harvester/1.0 (mailto:ict@unn.edu.ng)' },
+      })
+      if (!workResponse.ok) throw new Error(`OpenAlex organization search returned HTTP ${workResponse.status}`)
+
+      const workPayload = await workResponse.json()
+      const organizationCandidates = await Promise.all((workPayload.results || []).slice(0, 25).map(async (work) => {
+        const landingUrl = normalizeArticleUrl(work)
+        if (!landingUrl || !/^https:\/\/[^ ]+$/.test(landingUrl)) return null
+        if (!await verifyLiveUrl(landingUrl)) return null
+
+        const publicationDate = String(work.publication_date || '')
+        const year = Number(publicationDate.slice(0, 4))
+        if (year < startYear || year > endYear) return null
+
+        const authors = (work.authorships || []).map((entry) => entry.author?.display_name).filter(Boolean)
+        return {
+          id: work.id,
+          title: work.title,
+          authors: authors.join('; '),
+          year,
+          publicationDate,
+          journal: work.primary_location?.source?.display_name || 'Publisher not listed',
+          source: work.primary_location?.source?.display_name || 'OpenAlex',
+          link: landingUrl,
+          kept: true,
+        }
+      }))
+      const verified = organizationCandidates.filter(Boolean).slice(0, 40)
+      return res.json({ results: verified, searchMode: 'organization' })
+    }
+
     const params = new URLSearchParams({
       'query.author': name,
       filter: `from-pub-date:${startYear}-01-01,until-pub-date:${endYear}-12-31`,
@@ -116,10 +221,10 @@ app.get('/api/harvest', async (req, res) => {
     console.log(`Crossref returned ${payload.message?.items?.length || 0} items; ${candidates.length} exact-author candidates`)
 
     const verified = []
-    for (const item of candidates.slice(0, 40)) {
+    const crossrefVerified = await Promise.all(candidates.slice(0, 25).map(async (item) => {
       if (await verifyLiveUrl(item.URL)) {
         const date = getPublicationDate(item)
-        verified.push({
+        return {
           id: item.DOI || item.URL,
           title: item.title[0],
           authors: item.author.map((author) => [author.given, author.family].filter(Boolean).join(' ')).join('; '),
@@ -129,9 +234,11 @@ app.get('/api/harvest', async (req, res) => {
           source: item['container-title']?.[0] || item.publisher || 'Crossref',
           link: item.URL,
           kept: true,
-        })
+        }
       }
-    }
+      return null
+    }))
+    verified.push(...crossrefVerified.filter(Boolean))
 
     if (verified.length === 0) {
       const authorParams = new URLSearchParams({ search: name, per_page: '10' })
@@ -143,8 +250,7 @@ app.get('/api/harvest', async (req, res) => {
 
       const authorPayload = await authorResponse.json()
       const matchingAuthor = (authorPayload.results || []).find((author) =>
-        normalizeName(author.display_name) === normalizeName(name) ||
-        normalizeName(author.display_name).replace(/\s+/g, '') === normalizeName(name).replace(/\s+/g, '')
+        nameMatches(name, author.display_name)
       ) || null
 
       if (matchingAuthor?.id) {
@@ -162,19 +268,23 @@ app.get('/api/harvest', async (req, res) => {
         if (!workResponse.ok) throw new Error(`OpenAlex works search returned HTTP ${workResponse.status}`)
 
         const workPayload = await workResponse.json()
-        for (const work of workPayload.results || []) {
-          const landingUrl = work.primary_location?.landing_page_url || work.doi
-          if (!landingUrl || !/^https:\/\/[^ ]+$/.test(landingUrl)) continue
-          if (!await verifyLiveUrl(landingUrl)) continue
+        const authorWorks = await Promise.all((workPayload.results || []).slice(0, 25).map(async (work) => {
+          const landingUrl = normalizeArticleUrl(work)
+          if (!landingUrl || !/^https:\/\/[^ ]+$/.test(landingUrl)) return null
+          if (!await verifyLiveUrl(landingUrl)) return null
 
           const authors = (work.authorships || [])
             .map((entry) => entry.author?.display_name)
             .filter(Boolean)
           const publicationDate = String(work.publication_date || '')
           const year = Number(publicationDate.slice(0, 4))
-          if (year < startYear || year > endYear) continue
+          if (year < startYear || year > endYear) return null
+          const workAuthors = (work.authorships || [])
+            .map((entry) => entry.author?.display_name)
+            .filter(Boolean)
+          if (!workAuthors.some((authorName) => nameMatches(name, authorName))) return null
 
-          verified.push({
+          return {
             id: work.id,
             title: work.title,
             authors: authors.join('; '),
@@ -184,9 +294,9 @@ app.get('/api/harvest', async (req, res) => {
             source: work.primary_location?.source?.display_name || 'OpenAlex',
             link: landingUrl,
             kept: true,
-          })
-          if (verified.length >= 40) break
-        }
+          }
+        }))
+        verified.push(...authorWorks.filter(Boolean).slice(0, 40))
       }
     }
 
